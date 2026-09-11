@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>iOS Safari Audio Mix Test</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:22px;background:#f5f5f7;color:#111;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font-size:25px;margin:0 0 8px}
+p{line-height:1.5}
+.note{font-size:14px;color:#555}
+.status{padding:14px;margin:18px 0;border-radius:14px;background:#fff;box-shadow:0 1px 4px #ccc;font-size:14px;line-height:1.5}
+button{width:100%;border:0;border-radius:14px;background:#fff;box-shadow:0 1px 4px #ccc;padding:17px 12px;margin:7px 0;text-align:left;font-size:16px}
+button b{display:block;margin-bottom:3px}
+button span{font-size:12px;color:#666}
+.stop{background:#222;color:#fff;text-align:center}
+.result{margin-top:20px;background:#fff;border-radius:14px;padding:15px;box-shadow:0 1px 4px #ccc}
+.row{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:10px 0}
+.row:last-child{border:0}
+.mark{font-weight:700}
+.small{font-size:12px;color:#777}
+</style>
+</head>
+<body>
+
+<h1>🎧 iOS Safari Audio Mix Test</h1>
+<p class="note">
+먼저 <b>카카오톡 MP3를 재생</b>하세요.<br>
+그 상태에서 아래 버튼을 하나씩 눌러 Safari 소리가 카톡 소리와 동시에 유지되는지 확인합니다.
+</p>
+
+<div class="status" id="status">대기 중 — 카카오톡 MP3를 먼저 재생하세요.</div>
+
+<button onclick="runTest('webaudio')">
+<b>① Web Audio 기본값</b>
+<span>AudioContext / audioSession type을 직접 지정하지 않음</span>
+</button>
+
+<button onclick="runTest('ambient')">
+<b>② Web Audio + Ambient</b>
+<span>navigator.audioSession.type = "ambient"</span>
+</button>
+
+<button onclick="runTest('transient')">
+<b>③ Web Audio + Transient</b>
+<span>navigator.audioSession.type = "transient"</span>
+</button>
+
+<button onclick="runTest('playback')">
+<b>④ Web Audio + Playback</b>
+<span>navigator.audioSession.type = "playback"</span>
+</button>
+
+<button onclick="runTest('htmlaudio')">
+<b>⑤ 일반 HTML &lt;audio&gt;</b>
+<span>HTMLAudioElement / playback 계열</span>
+</button>
+
+<button onclick="runTest('htmlvideo')">
+<b>⑥ HTML &lt;video&gt;</b>
+<span>HTMLVideoElement / playback 계열</span>
+</button>
+
+<button class="stop" onclick="stopEverything()">■ 테스트 정지</button>
+
+<div class="result">
+<b>테스트 기록</b>
+<div class="row"><span>Web Audio</span><span id="r-webaudio" class="mark">—</span></div>
+<div class="row"><span>Ambient</span><span id="r-ambient" class="mark">—</span></div>
+<div class="row"><span>Transient</span><span id="r-transient" class="mark">—</span></div>
+<div class="row"><span>Playback</span><span id="r-playback" class="mark">—</span></div>
+<div class="row"><span>HTML audio</span><span id="r-htmlaudio" class="mark">—</span></div>
+<div class="row"><span>HTML video</span><span id="r-htmlvideo" class="mark">—</span></div>
+</div>
+
+<p class="small">
+각 테스트는 약 8초간 440Hz 톤을 냅니다.<br>
+결과 기록은 이 페이지를 새로고침하면 초기화됩니다.<br>
+※ iOS 버전 및 Safari/WebKit 버전에 따라 결과가 달라질 수 있습니다.
+</p>
+
+<script>
+let ctx=null;
+let osc=null;
+let gain=null;
+let media=null;
+let timer=null;
+let currentKey=null;
+
+const names={
+  webaudio:"Web Audio 기본값",
+  ambient:"Ambient",
+  transient:"Transient",
+  playback:"Playback",
+  htmlaudio:"HTML audio",
+  htmlvideo:"HTML video"
+};
+
+function setStatus(text){
+  document.getElementById("status").innerHTML=text;
+}
+
+function setResult(key,text){
+  document.getElementById("r-"+key).textContent=text;
+}
+
+function cleanup(){
+  clearTimeout(timer);
+  timer=null;
+
+  if(osc){
+    try{osc.stop()}catch(e){}
+    osc=null;
+  }
+
+  if(ctx){
+    try{ctx.close()}catch(e){}
+    ctx=null;
+  }
+
+  if(media){
+    try{
+      media.pause();
+      media.removeAttribute("src");
+      media.load();
+    }catch(e){}
+    media=null;
+  }
+}
+
+function stopEverything(){
+  cleanup();
+  currentKey=null;
+  setStatus("테스트 정지됨.");
+}
+
+async function configureSession(type){
+  if(!("audioSession" in navigator)){
+    setStatus(
+      "<b>navigator.audioSession을 지원하지 않는 Safari입니다.</b><br>"+
+      "Web Audio 기본 테스트는 계속 가능합니다."
+    );
+    return false;
+  }
+
+  try{
+    navigator.audioSession.type=type;
+    return true;
+  }catch(e){
+    setStatus("Audio Session 설정 실패: "+e.message);
+    return false;
+  }
+}
+
+async function createTone(){
+  ctx=new AudioContext();
+  await ctx.resume();
+
+  osc=ctx.createOscillator();
+  gain=ctx.createGain();
+
+  osc.type="sine";
+  osc.frequency.value=440;
+  gain.gain.value=0.12;
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  osc.start();
+
+  timer=setTimeout(()=>{
+    cleanup();
+    setStatus("테스트 종료 — "+names[currentKey]);
+  },8000);
+}
+
+async function runWebAudio(){
+  cleanup();
+
+  currentKey="webaudio";
+  setStatus("<b>Web Audio 기본값</b><br>8초간 재생 중…");
+
+  try{
+    await createTone();
+    setResult("webaudio","재생됨");
+  }catch(e){
+    setResult("webaudio","실패");
+    setStatus("Web Audio 재생 실패: "+e.message);
+  }
+}
+
+async function runSessionTest(key,type){
+  cleanup();
+
+  currentKey=key;
+
+  if(!await configureSession(type)) return;
+
+  setStatus("<b>"+names[key]+"</b><br>audioSession.type = \""+type+"\"<br>8초간 재생 중…");
+
+  try{
+    await createTone();
+    setResult(key,"재생됨");
+  }catch(e){
+    setResult(key,"실패");
+    setStatus(names[key]+" 재생 실패: "+e.message);
+  }
+}
+
+function makeWavDataURI(){
+  // 0.5초짜리 440Hz WAV 생성
+  const sampleRate=44100;
+  const duration=0.5;
+  const samples=Math.floor(sampleRate*duration);
+  const buffer=new ArrayBuffer(44+samples*2);
+  const view=new DataView(buffer);
+
+  function writeString(offset,str){
+    for(let i=0;i<str.length;i++) view.setUint8(offset+i,str.charCodeAt(i));
+  }
+
+  writeString(0,"RIFF");
+  view.setUint32(4,36+samples*2,true);
+  writeString(8,"WAVE");
+  writeString(12,"fmt ");
+  view.setUint32(16,16,true);
+  view.setUint16(20,1,true);
+  view.setUint16(22,1,true);
+  view.setUint32(24,sampleRate,true);
+  view.setUint32(28,sampleRate*2,true);
+  view.setUint16(32,2,true);
+  view.setUint16(34,16,true);
+  writeString(36,"data");
+  view.setUint32(40,samples*2,true);
+
+  for(let i=0;i<samples;i++){
+    const s=Math.sin(2*Math.PI*440*i/sampleRate);
+    view.setInt16(44+i*2,Math.round(s*12000),true);
+  }
+
+  let binary="";
+  const bytes=new Uint8Array(buffer);
+  for(let i=0;i<bytes.length;i++) binary+=String.fromCharCode(bytes[i]);
+  return "data:audio/wav;base64,"+btoa(binary);
+}
+
+function runHTMLMedia(key,tag){
+  cleanup();
+  currentKey=key;
+
+  if("audioSession" in navigator){
+    try{navigator.audioSession.type="playback"}catch(e){}
+  }
+
+  media=document.createElement(tag);
+  media.src=makeWavDataURI();
+  media.loop=true;
+  media.volume=0.2;
+  media.playsInline=true;
+
+  media.play().then(()=>{
+    setResult(key,"재생됨");
+    setStatus("<b>"+names[key]+"</b><br>일반 HTML media 방식으로 8초간 재생 중…");
+  }).catch(e=>{
+    setResult(key,"실패");
+    setStatus(names[key]+" 재생 실패: "+e.message);
+  });
+
+  timer=setTimeout(()=>{
+    cleanup();
+    setStatus("테스트 종료 — "+names[key]);
+  },8000);
+}
+
+async function runTest(key){
+  if(key==="webaudio") return runWebAudio();
+  if(key==="ambient") return runSessionTest(key,"ambient");
+  if(key==="transient") return runSessionTest(key,"transient");
+  if(key==="playback") return runSessionTest(key,"playback");
+  if(key==="htmlaudio") return runHTMLMedia(key,"audio");
+  if(key==="htmlvideo") return runHTMLMedia(key,"video");
+}
+
+setStatus(
+  "<b>준비 완료.</b><br>"+
+  "① 카카오톡 MP3 재생 → ② Safari로 돌아오기 → ③ 버튼 하나 선택"
+);
+</script>
+
+</body>
+</html>
